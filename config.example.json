@@ -10,6 +10,7 @@
   },
   "stateDir": "~/.wechat-agents",
   "allowedUsers": [],
+  "adminUsers": [],
   "maxSessionAge": 86400000,
   "textChunkLimit": 4000,
   "logLevel": "INFO"

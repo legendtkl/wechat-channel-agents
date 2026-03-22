@@ -62,6 +62,7 @@ ANTHROPIC_AUTH_TOKEN=sk-xxx
   },
   "stateDir": "~/.wechat-agents",
   "allowedUsers": [],
+  "adminUsers": ["your_wechat_user_id"],
   "logLevel": "INFO"
 }
 ```
@@ -84,9 +85,11 @@ A QR code will appear in the terminal. Scan it with WeChat to log in. Once conne
 | `/status` | Show current agent type and session info |
 | `/help` | List all available commands |
 | `/cwd <path>` | Change working directory |
+| `/logout` | Admin-only logout, clear local credentials, and stop the service |
 | Plain text | Send to current agent for processing |
 
 The default agent is Claude Code. When you switch agents, the other agent's session is preserved — you can switch back and continue where you left off.
+`/logout` is only enabled for users listed in `adminUsers`; if `adminUsers` is empty, the command is disabled.
 
 ## Project Structure
 
