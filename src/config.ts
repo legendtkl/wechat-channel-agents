@@ -63,7 +63,7 @@ export function loadConfig(): AppConfig {
     anthropicAuthToken,
     codex: {
       model: fileConfig.codex?.model,
-      sandboxMode: fileConfig.codex?.sandboxMode,
+      sandboxMode: fileConfig.codex?.sandboxMode || "danger-full-access",
       workingDirectory: resolvePath(fileConfig.codex?.workingDirectory || "."),
     },
     stateDir: resolvePath(fileConfig.stateDir || "~/.wechat-agents"),

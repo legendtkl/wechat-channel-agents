@@ -6,6 +6,7 @@
     "botType": "3"
   },
   "codex": {
+    "sandboxMode": "danger-full-access",
     "workingDirectory": "."
   },
   "stateDir": "~/.wechat-agents",
