@@ -2,7 +2,7 @@ import { loadConfig } from "./config.js";
 import { setLogLevel, setLogFile, logger } from "./util/logger.js";
 import { StateManager } from "./storage/state.js";
 import { initSessions, cleanupSessions } from "./storage/sessions.js";
-import { setAllowedUsers } from "./auth/allowlist.js";
+import { setAllowedUsers, setAdminUsers } from "./auth/allowlist.js";
 import { loginWithQr } from "./wechat/login.js";
 import { startMonitor } from "./wechat/monitor.js";
 import { registerAgent } from "./agent/registry.js";
@@ -26,6 +26,7 @@ async function main(): Promise<void> {
 
   // 4. Setup allowlist
   setAllowedUsers(config.allowedUsers);
+  setAdminUsers(config.adminUsers);
 
   // 5. Load persisted state
   const stateManager = new StateManager(config.stateDir);
@@ -65,27 +66,40 @@ async function main(): Promise<void> {
   registerAgent(new CodexBackend(config));
   logger.info("Registered Codex backend");
 
-  // 8. Create dispatcher
+  // 8. Create shutdown controls and dispatcher
+  const abortController = new AbortController();
+  const cleanupInterval = setInterval(() => {
+    cleanupSessions(config.maxSessionAge);
+  }, 60 * 60 * 1000);
+
+  let shuttingDown = false;
+  const shutdown = (message: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(message);
+    abortController.abort();
+    clearInterval(cleanupInterval);
+  };
+
+  const handleLogout = async () => {
+    logger.warn("Logout requested via command. Clearing persisted credentials.");
+    stateManager.update({
+      credentials: undefined,
+      getUpdatesBuf: "",
+    });
+    shutdown("Shutting down after logout...");
+  };
+
   const apiOpts = {
     baseUrl: credentials.baseUrl,
     token: credentials.token,
     routeTag: config.wechat.routeTag,
   };
 
-  const dispatch = createDispatcher({ apiOpts, config });
-
-  // 9. Periodic session cleanup
-  const cleanupInterval = setInterval(() => {
-    cleanupSessions(config.maxSessionAge);
-  }, 60 * 60 * 1000);
-
-  // 10. Start monitor with abort handling
-  const abortController = new AbortController();
+  const dispatch = createDispatcher({ apiOpts, config, onLogout: handleLogout });
 
   const gracefulShutdown = () => {
-    logger.info("Shutting down...");
-    abortController.abort();
-    clearInterval(cleanupInterval);
+    shutdown("Shutting down...");
   };
 
   process.on("SIGINT", gracefulShutdown);

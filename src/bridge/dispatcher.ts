@@ -6,7 +6,7 @@ import { sendTextMessage, markdownToPlainText } from "../wechat/send.js";
 import { setContextToken, getContextToken } from "../wechat/context-token.js";
 import { getAgent, getRegisteredTypes } from "../agent/registry.js";
 import { getOrCreateSession, updateSession, resetAgentSession } from "../storage/sessions.js";
-import { isUserAllowed } from "../auth/allowlist.js";
+import { hasAdminUsers, isUserAdmin, isUserAllowed } from "../auth/allowlist.js";
 import { resolveAvailableAgentType } from "./agent-resolution.js";
 import { formatResponse } from "./formatter.js";
 import { chunkText } from "./chunker.js";
@@ -19,6 +19,7 @@ const TYPING_INTERVAL_MS = 10_000;
 export interface DispatcherDeps {
   apiOpts: WeixinApiOptions;
   config: AppConfig;
+  onLogout?: () => Promise<void>;
 }
 
 export function createDispatcher(deps: DispatcherDeps) {
@@ -70,6 +71,9 @@ export function createDispatcher(deps: DispatcherDeps) {
         return;
       case "/cwd":
         await handleCwd(userId, trimmed.slice(4).trim());
+        return;
+      case "/logout":
+        await handleLogout(userId);
         return;
     }
 
@@ -144,6 +148,9 @@ export function createDispatcher(deps: DispatcherDeps) {
 
   async function handleHelp(userId: string): Promise<void> {
     const types = getRegisteredTypes();
+    const logoutHelp = hasAdminUsers()
+      ? "  /logout - Log out bot and stop service (admin only)"
+      : "  /logout - Log out bot and stop service (disabled until adminUsers is configured)";
     const lines = [
       "Commands:",
       ...types.map((t) => `  /${t} - Switch to ${t}`),
@@ -151,6 +158,7 @@ export function createDispatcher(deps: DispatcherDeps) {
       "  /status - Show current status",
       "  /help - Show this help",
       "  /cwd <path> - Change working directory",
+      logoutHelp,
       "",
       `Available agents: ${types.join(", ")}`,
       "Send any text to chat with the current agent.",
@@ -166,6 +174,27 @@ export function createDispatcher(deps: DispatcherDeps) {
       updateSession(userId, { cwd: newCwd });
       await sendReply(userId, `Working directory changed to: ${newCwd}`);
     }
+  }
+
+  async function handleLogout(userId: string): Promise<void> {
+    if (!hasAdminUsers()) {
+      logger.warn(`Logout command denied for user=${redactUserId(userId)}: no admin users configured`);
+      await sendReply(userId, "Command /logout is disabled until adminUsers is configured.");
+      return;
+    }
+
+    if (!isUserAdmin(userId)) {
+      logger.warn(`Logout command denied for non-admin user=${redactUserId(userId)}`);
+      await sendReply(userId, "Command /logout is restricted to admin users.");
+      return;
+    }
+
+    await sendReply(
+      userId,
+      "Logging out bot. Local credentials will be cleared and the service will stop. Restart npm run dev to scan a new QR code.",
+    );
+
+    await deps.onLogout?.();
   }
 
   async function sendReply(userId: string, text: string): Promise<void> {

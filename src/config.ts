@@ -25,9 +25,15 @@ interface FileConfig {
   };
   stateDir?: string;
   allowedUsers?: string[];
+  adminUsers?: string[];
   maxSessionAge?: number;
   textChunkLimit?: number;
   logLevel?: string;
+}
+
+function parseUserList(value?: string): string[] | undefined {
+  if (!value) return undefined;
+  return value.split(",").map((s) => s.trim()).filter(Boolean);
 }
 
 export function loadConfig(): AppConfig {
@@ -43,6 +49,8 @@ export function loadConfig(): AppConfig {
 
   const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL || "";
   const anthropicAuthToken = process.env.ANTHROPIC_AUTH_TOKEN || "";
+  const allowedUsers = fileConfig.allowedUsers ?? parseUserList(process.env.ALLOWED_USERS) ?? [];
+  const adminUsers = fileConfig.adminUsers ?? parseUserList(process.env.ADMIN_USERS) ?? allowedUsers;
 
   const config: AppConfig = {
     defaultAgent: (fileConfig.defaultAgent as AppConfig["defaultAgent"]) || "claude",
@@ -59,10 +67,8 @@ export function loadConfig(): AppConfig {
       workingDirectory: resolvePath(fileConfig.codex?.workingDirectory || "."),
     },
     stateDir: resolvePath(fileConfig.stateDir || "~/.wechat-agents"),
-    allowedUsers: fileConfig.allowedUsers
-      ?? (process.env.ALLOWED_USERS
-        ? process.env.ALLOWED_USERS.split(",").map((s) => s.trim()).filter(Boolean)
-        : []),
+    allowedUsers,
+    adminUsers,
     maxSessionAge: fileConfig.maxSessionAge ?? 86_400_000,
     textChunkLimit: fileConfig.textChunkLimit ?? 4000,
     logLevel: fileConfig.logLevel ?? process.env.LOG_LEVEL ?? "INFO",

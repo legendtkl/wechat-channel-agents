@@ -24,6 +24,7 @@ export interface AppConfig {
   };
   stateDir: string;
   allowedUsers: string[];
+  adminUsers: string[];
   maxSessionAge: number;
   textChunkLimit: number;
   logLevel: string;

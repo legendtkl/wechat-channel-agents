@@ -62,6 +62,7 @@ ANTHROPIC_AUTH_TOKEN=sk-xxx
   },
   "stateDir": "~/.wechat-agents",
   "allowedUsers": [],
+  "adminUsers": ["your_wechat_user_id"],
   "logLevel": "INFO"
 }
 ```
@@ -84,9 +85,11 @@ npm run dev
 | `/status` | 查看当前 agent 类型和会话信息 |
 | `/help` | 显示所有可用命令 |
 | `/cwd <path>` | 修改工作目录 |
+| `/logout` | 管理员登出 bot，清除本地凭证并停止服务 |
 | 普通文本 | 发送给当前 agent 处理 |
 
 默认使用 Claude Code。切换 agent 时，另一端的会话不会丢失，可随时切回继续。
+`/logout` 默认只对 `adminUsers` 生效；如果未配置 `adminUsers`，该命令会被禁用。
 
 ## 项目结构
 
