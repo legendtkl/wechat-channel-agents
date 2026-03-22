@@ -1,0 +1,16 @@
+{
+  "defaultAgent": "claude",
+  "wechat": {
+    "baseUrl": "https://ilinkai.weixin.qq.com",
+    "routeTag": null,
+    "botType": "3"
+  },
+  "codex": {
+    "workingDirectory": "."
+  },
+  "stateDir": "~/.wechat-agents",
+  "allowedUsers": [],
+  "maxSessionAge": 86400000,
+  "textChunkLimit": 4000,
+  "logLevel": "INFO"
+}
