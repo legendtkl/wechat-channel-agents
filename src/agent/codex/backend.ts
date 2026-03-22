@@ -14,24 +14,42 @@ export class CodexBackend implements AgentBackend {
   readonly type = "codex" as const;
   private users = new Map<string, PerUserCodex>();
   private config: AppConfig;
+  private codexBaseUrl: string | undefined;
+  private codexEnv: Record<string, string>;
 
   constructor(config: AppConfig) {
     this.config = config;
+    this.codexBaseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAIBASEURL || undefined;
+    this.codexEnv = this.buildCodexEnv();
   }
 
   private getOrCreate(userId: string): PerUserCodex {
     let entry = this.users.get(userId);
     if (!entry) {
-      entry = { codex: new Codex(), thread: null };
+      entry = {
+        codex: new Codex({
+          baseUrl: this.codexBaseUrl,
+          env: this.codexEnv,
+        }),
+        thread: null,
+      };
       this.users.set(userId, entry);
     }
     return entry;
+  }
+
+  private buildCodexEnv(): Record<string, string> {
+    const env = { ...process.env };
+    delete env.OPENAI_BASE_URL;
+    delete env.OPENAIBASEURL;
+    return env as Record<string, string>;
   }
 
   private buildThreadOptions(): import("@openai/codex-sdk").ThreadOptions {
     const opts: import("@openai/codex-sdk").ThreadOptions = {
       workingDirectory: this.config.codex.workingDirectory,
       skipGitRepoCheck: true,
+      sandboxMode: "danger-full-access",
     };
     if (this.config.codex.model) {
       opts.model = this.config.codex.model;
