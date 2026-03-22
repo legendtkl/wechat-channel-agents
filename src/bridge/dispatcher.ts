@@ -7,6 +7,7 @@ import { setContextToken, getContextToken } from "../wechat/context-token.js";
 import { getAgent, getRegisteredTypes } from "../agent/registry.js";
 import { getOrCreateSession, updateSession, resetAgentSession } from "../storage/sessions.js";
 import { isUserAllowed } from "../auth/allowlist.js";
+import { resolveAvailableAgentType } from "./agent-resolution.js";
 import { formatResponse } from "./formatter.js";
 import { chunkText } from "./chunker.js";
 import { logger } from "../util/logger.js";
@@ -74,13 +75,14 @@ export function createDispatcher(deps: DispatcherDeps) {
 
     // Route to agent
     const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
+    const agentType = ensureSessionAgentAvailable(userId, session);
 
     // Start typing indicator
     const typingController = new AbortController();
     startTypingLoop(userId, typingTicket, typingController.signal);
 
     try {
-      const agent = getAgent(session.agentType);
+      const agent = getAgent(agentType);
       const result = await agent.run({
         userId,
         prompt: trimmed,
@@ -108,28 +110,31 @@ export function createDispatcher(deps: DispatcherDeps) {
       return;
     }
     const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    if (session.agentType === agentType) {
+    const currentAgentType = ensureSessionAgentAvailable(userId, session);
+    if (currentAgentType === agentType) {
       await sendReply(userId, `Already using ${agentType}.`);
       return;
     }
     updateSession(userId, { agentType });
-    await sendReply(userId, `Switched to ${agentType}. Previous ${session.agentType} session is preserved.`);
+    await sendReply(userId, `Switched to ${agentType}. Previous ${currentAgentType} session is preserved.`);
   }
 
   async function handleReset(userId: string): Promise<void> {
     const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const agent = getAgent(session.agentType);
+    const agentType = ensureSessionAgentAvailable(userId, session);
+    const agent = getAgent(agentType);
     agent.resetSession(userId);
-    resetAgentSession(userId, session.agentType);
-    await sendReply(userId, `${session.agentType} session reset. Starting fresh.`);
+    resetAgentSession(userId, agentType);
+    await sendReply(userId, `${agentType} session reset. Starting fresh.`);
   }
 
   async function handleStatus(userId: string): Promise<void> {
     const session = getOrCreateSession(userId, config.defaultAgent, config.codex.workingDirectory);
-    const agent = getAgent(session.agentType);
+    const agentType = ensureSessionAgentAvailable(userId, session);
+    const agent = getAgent(agentType);
     const agentStatus = agent.getStatus(userId);
     const lines = [
-      `Current agent: ${session.agentType}`,
+      `Current agent: ${agentType}`,
       `CWD: ${session.cwd}`,
       `Last active: ${new Date(session.lastActive).toISOString()}`,
       agentStatus,
@@ -220,6 +225,26 @@ export function createDispatcher(deps: DispatcherDeps) {
     }, TYPING_INTERVAL_MS);
 
     signal.addEventListener("abort", () => clearInterval(interval), { once: true });
+  }
+
+  function ensureSessionAgentAvailable(
+    userId: string,
+    session: { agentType: AgentType },
+  ): AgentType {
+    const resolvedAgentType = resolveAvailableAgentType(
+      session.agentType,
+      config.defaultAgent,
+      getRegisteredTypes(),
+    );
+
+    if (resolvedAgentType !== session.agentType) {
+      logger.warn(
+        `Session agent ${session.agentType} unavailable for user=${redactUserId(userId)}; falling back to ${resolvedAgentType}`,
+      );
+      updateSession(userId, { agentType: resolvedAgentType });
+    }
+
+    return resolvedAgentType;
   }
 }
 
