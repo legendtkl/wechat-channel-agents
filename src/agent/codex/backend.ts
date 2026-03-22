@@ -14,12 +14,10 @@ export class CodexBackend implements AgentBackend {
   readonly type = "codex" as const;
   private users = new Map<string, PerUserCodex>();
   private config: AppConfig;
-  private codexBaseUrl: string | undefined;
   private codexEnv: Record<string, string>;
 
   constructor(config: AppConfig) {
     this.config = config;
-    this.codexBaseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAIBASEURL || undefined;
     this.codexEnv = this.buildCodexEnv();
   }
 
@@ -28,7 +26,6 @@ export class CodexBackend implements AgentBackend {
     if (!entry) {
       entry = {
         codex: new Codex({
-          baseUrl: this.codexBaseUrl,
           env: this.codexEnv,
         }),
         thread: null,
