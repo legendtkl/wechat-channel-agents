@@ -50,7 +50,7 @@ export function loadConfig(): AppConfig {
   const anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL || "";
   const anthropicAuthToken = process.env.ANTHROPIC_AUTH_TOKEN || "";
   const allowedUsers = fileConfig.allowedUsers ?? parseUserList(process.env.ALLOWED_USERS) ?? [];
-  const adminUsers = fileConfig.adminUsers ?? parseUserList(process.env.ADMIN_USERS) ?? allowedUsers;
+  const adminUsers = fileConfig.adminUsers ?? parseUserList(process.env.ADMIN_USERS) ?? [];
 
   const config: AppConfig = {
     defaultAgent: (fileConfig.defaultAgent as AppConfig["defaultAgent"]) || "claude",
