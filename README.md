@@ -90,7 +90,7 @@ npm run dev
 | 普通文本 | 发送给当前 agent 处理 |
 
 默认使用 Claude Code。切换 agent 时，另一端的会话不会丢失，可随时切回继续。
-`/logout` 默认只对 `adminUsers` 生效；如果未配置 `adminUsers`，该命令会被禁用。
+`/logout` 仅对 `adminUsers` 中的用户生效；`adminUsers` 需要单独配置，不会从 `allowedUsers` 继承。如果未配置 `adminUsers`，该命令会被禁用。
 Codex 默认以 `danger-full-access` 运行，避免某些 Linux 环境下 `bwrap` 兼容性问题；如需更严格的隔离，可在 `codex.sandboxMode` 中覆盖。
 
 ## 项目结构

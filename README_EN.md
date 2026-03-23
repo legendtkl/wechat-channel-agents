@@ -90,7 +90,7 @@ A QR code will appear in the terminal. Scan it with WeChat to log in. Once conne
 | Plain text | Send to current agent for processing |
 
 The default agent is Claude Code. When you switch agents, the other agent's session is preserved — you can switch back and continue where you left off.
-`/logout` is only enabled for users listed in `adminUsers`; if `adminUsers` is empty, the command is disabled.
+`/logout` is only enabled for users listed in `adminUsers`. `adminUsers` must be configured separately — it does not inherit from `allowedUsers`. If `adminUsers` is empty, the command is disabled.
 Codex defaults to `danger-full-access` to avoid `bwrap` compatibility failures on some Linux hosts; override `codex.sandboxMode` if you want a stricter sandbox.
 
 ## Project Structure
