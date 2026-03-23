@@ -36,23 +36,23 @@ export class CodexBackend implements AgentBackend {
   }
 
   private buildCodexEnv(): Record<string, string> {
-    const env = { ...process.env };
-    delete env.OPENAI_BASE_URL;
-    delete env.OPENAIBASEURL;
-    return env as Record<string, string>;
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v !== undefined && k !== "OPENAI_BASE_URL" && k !== "OPENAIBASEURL") {
+        env[k] = v;
+      }
+    }
+    return env;
   }
 
   private buildThreadOptions(): import("@openai/codex-sdk").ThreadOptions {
     const opts: import("@openai/codex-sdk").ThreadOptions = {
       workingDirectory: this.config.codex.workingDirectory,
       skipGitRepoCheck: true,
-      sandboxMode: "danger-full-access",
+      sandboxMode: (this.config.codex.sandboxMode || "danger-full-access") as SandboxMode,
     };
     if (this.config.codex.model) {
       opts.model = this.config.codex.model;
-    }
-    if (this.config.codex.sandboxMode) {
-      opts.sandboxMode = this.config.codex.sandboxMode as SandboxMode;
     }
     return opts;
   }
