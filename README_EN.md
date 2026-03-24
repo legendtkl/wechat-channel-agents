@@ -27,7 +27,7 @@ A WeChat bot bridge that supports both **Claude Code** and **Codex** AI agents i
 ### Install
 
 ```bash
-git clone https://github.com/anthropics/wechat-channel-agents.git
+git clone https://github.com/legendtkl/wechat-channel-agents.git
 cd wechat-channel-agents
 npm install
 ```
