@@ -5,6 +5,7 @@ import { initSessions, cleanupSessions } from "./storage/sessions.js";
 import { setAllowedUsers, setAdminUsers } from "./auth/allowlist.js";
 import { loginWithQr } from "./wechat/login.js";
 import { startMonitor } from "./wechat/monitor.js";
+import { initContextTokenStore, clearContextTokens } from "./wechat/context-token.js";
 import { registerAgent } from "./agent/registry.js";
 import { ClaudeBackend } from "./agent/claude/backend.js";
 import { CodexBackend } from "./agent/codex/backend.js";
@@ -31,6 +32,7 @@ async function main(): Promise<void> {
   // 5. Load persisted state
   const stateManager = new StateManager(config.stateDir);
   stateManager.load();
+  initContextTokenStore(config.stateDir);
 
   // 6. Login if needed
   const state = stateManager.get();
@@ -83,6 +85,7 @@ async function main(): Promise<void> {
 
   const handleLogout = async () => {
     logger.warn("Logout requested via command. Clearing persisted credentials.");
+    clearContextTokens();
     stateManager.update({
       credentials: undefined,
       getUpdatesBuf: "",
