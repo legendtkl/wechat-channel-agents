@@ -1,5 +1,6 @@
 import { getUpdates } from "./api.js";
 import type { WeixinApiOptions } from "./api.js";
+import { MessageType } from "./types.js";
 import type { WeixinMessage } from "./types.js";
 import { WeixinConfigManager } from "./config-cache.js";
 import {
@@ -115,17 +116,25 @@ export async function startMonitor(opts: MonitorOptions): Promise<void> {
         );
 
         const fromUserId = msg.from_user_id ?? "";
-        const cachedConfig = await configManager.getForUser(
-          fromUserId,
-          msg.context_token,
-        );
+
+        // Only fetch typing config for user messages; calling getConfig with a
+        // bot-reply's context_token may signal the server that the conversation
+        // is finished and invalidate the token for future replies.
+        let typingTicket = "";
+        if (msg.message_type === MessageType.USER && fromUserId) {
+          const cachedConfig = await configManager.getForUser(
+            fromUserId,
+            msg.context_token,
+          );
+          typingTicket = cachedConfig.typingTicket;
+        }
 
         try {
           await onMessage({
             accountId: opts.accountId,
             apiOpts,
             msg,
-            typingTicket: cachedConfig.typingTicket,
+            typingTicket,
           });
         } catch (err) {
           logger.error(`Message handler error: accountId=${opts.accountId} from=${fromUserId} err=${String(err)}`);

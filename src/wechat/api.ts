@@ -134,7 +134,7 @@ export async function getUpdates(
 export async function sendMessage(
   params: WeixinApiOptions & { body: SendMessageReq },
 ): Promise<void> {
-  await apiFetch({
+  const rawText = await apiFetch({
     baseUrl: params.baseUrl,
     endpoint: "ilink/bot/sendmessage",
     body: JSON.stringify({ ...params.body, base_info: buildBaseInfo() }),
@@ -143,6 +143,10 @@ export async function sendMessage(
     timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
     label: "sendMessage",
   });
+  const resp = JSON.parse(rawText) as SendMessageResp;
+  if (resp.ret !== undefined && resp.ret !== 0) {
+    throw new Error(`sendMessage failed: ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
+  }
 }
 
 export async function getConfig(
