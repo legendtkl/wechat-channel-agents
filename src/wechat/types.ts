@@ -122,6 +122,7 @@ export interface SendMessageReq {
 
 export interface SendMessageResp {
   ret?: number;
+  errcode?: number;
   errmsg?: string;
 }
 
