@@ -6,6 +6,7 @@ import type {
   GetUpdatesReq,
   GetUpdatesResp,
   SendMessageReq,
+  SendMessageResp,
   SendTypingReq,
   GetConfigResp,
   GetUploadUrlReq,
@@ -99,6 +100,28 @@ async function apiFetch(params: {
   }
 }
 
+function assertApiSuccess(
+  label: string,
+  payload: { ret?: number; errcode?: number; errmsg?: string },
+): void {
+  const ret = payload.ret ?? 0;
+  const errcode = payload.errcode ?? 0;
+
+  if (ret === 0 && errcode === 0) {
+    return;
+  }
+
+  const details = [
+    `ret=${ret}`,
+    errcode !== 0 ? `errcode=${errcode}` : undefined,
+    payload.errmsg ? `errmsg=${payload.errmsg}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  throw new Error(`${label} failed: ${details}`);
+}
+
 export async function getUpdates(
   params: GetUpdatesReq & {
     baseUrl: string;
@@ -134,7 +157,7 @@ export async function getUpdates(
 export async function sendMessage(
   params: WeixinApiOptions & { body: SendMessageReq },
 ): Promise<void> {
-  await apiFetch({
+  const rawText = await apiFetch({
     baseUrl: params.baseUrl,
     endpoint: "ilink/bot/sendmessage",
     body: JSON.stringify({ ...params.body, base_info: buildBaseInfo() }),
@@ -143,6 +166,7 @@ export async function sendMessage(
     timeoutMs: params.timeoutMs ?? DEFAULT_API_TIMEOUT_MS,
     label: "sendMessage",
   });
+  assertApiSuccess("sendMessage", JSON.parse(rawText) as SendMessageResp);
 }
 
 export async function getConfig(
