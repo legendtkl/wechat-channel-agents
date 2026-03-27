@@ -44,6 +44,8 @@ export function createDispatcher(deps: DispatcherDeps) {
     // Cache context_token
     if (msg.context_token) {
       setContextToken(accountId, userId, msg.context_token);
+    } else {
+      logger.warn(`No context_token in message from user=${redactUserId(userId)} — will reuse last known token`);
     }
 
     // Extract text
