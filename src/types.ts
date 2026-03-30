@@ -1,11 +1,20 @@
 export type AgentType = "claude" | "codex";
 
+export interface AgentSessionRecord {
+  sessionId: string;
+  cwd: string;
+  createdAt: number;
+  archivedAt: number;
+}
+
 export interface UserSession {
   agentType: AgentType;
   cwd: string;
   lastActive: number;
   claudeSessionId?: string;
   codexThreadId?: string;
+  claudeHistory?: AgentSessionRecord[];
+  codexHistory?: AgentSessionRecord[];
 }
 
 export interface AppConfig {
