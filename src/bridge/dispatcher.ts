@@ -1,3 +1,4 @@
+import type { AgentImageInput } from "../agent/interface.js";
 import type { WeixinMessage } from "../wechat/types.js";
 import { MessageType, MessageItemType, TypingStatus } from "../wechat/types.js";
 import { sendTyping } from "../wechat/api.js";
@@ -12,6 +13,8 @@ import { formatResponse } from "./formatter.js";
 import { chunkText } from "./chunker.js";
 import { logger } from "../util/logger.js";
 import { redactUserId } from "../util/redact.js";
+import { downloadImage } from "../media/download.js";
+import { detectImageMimeType } from "../media/mime.js";
 import { buildConversationKey, type AgentType, type AppConfig } from "../types.js";
 
 const TYPING_INTERVAL_MS = 10_000;
@@ -46,21 +49,32 @@ export function createDispatcher(deps: DispatcherDeps) {
       setContextToken(accountId, userId, msg.context_token);
     }
 
-    // Extract text
-    const text = extractText(msg);
-    if (!text) return;
-
     // Allowlist check
     if (!isUserAllowed(userId)) {
       logger.warn(`User not in allowlist: ${redactUserId(userId)}`);
       return;
     }
 
-    logger.info(`Message from=${redactUserId(userId)} len=${text.length}`);
+    const input = await extractAgentInput(msg);
+    if (!input.prompt && input.images.length === 0) {
+      if (input.imageCount > 0 && input.failedImageCount === input.imageCount) {
+        await sendReply(
+          accountId,
+          apiOpts,
+          userId,
+          "Received the image, but failed to download it from WeChat.",
+        );
+      }
+      return;
+    }
+
+    logger.info(
+      `Message from=${redactUserId(userId)} len=${input.prompt.length} images=${input.images.length}`,
+    );
 
     // Parse commands
-    const trimmed = text.trim();
-    const firstWord = trimmed.split(/\s/)[0].toLowerCase();
+    const trimmed = input.prompt.trim();
+    const firstWord = trimmed ? trimmed.split(/\s/)[0].toLowerCase() : "";
 
     switch (firstWord) {
       case "/claude":
@@ -92,17 +106,28 @@ export function createDispatcher(deps: DispatcherDeps) {
     // Route to agent
     const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
     const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
+    const agent = getAgent(agentType);
+
+    if (input.images.length > 0 && agent.supportsImages !== true) {
+      await sendReply(
+        accountId,
+        apiOpts,
+        userId,
+        `${agentType} does not support image input in this bridge yet. Switch to /claude to analyze images.`,
+      );
+      return;
+    }
 
     // Start typing indicator
     const typingController = new AbortController();
     startTypingLoop(apiOpts, userId, typingTicket, typingController.signal);
 
     try {
-      const agent = getAgent(agentType);
       const result = await agent.run({
         userId: conversationKey,
         prompt: trimmed,
         cwd: session.cwd,
+        images: input.images,
       });
 
       typingController.abort();
@@ -384,12 +409,70 @@ export function createDispatcher(deps: DispatcherDeps) {
   }
 }
 
-function extractText(msg: WeixinMessage): string {
-  if (!msg.item_list?.length) return "";
+interface ExtractedAgentInput {
+  prompt: string;
+  images: AgentImageInput[];
+  imageCount: number;
+  failedImageCount: number;
+}
+
+async function extractAgentInput(msg: WeixinMessage): Promise<ExtractedAgentInput> {
+  const textParts: string[] = [];
+  const images: AgentImageInput[] = [];
+  let imageCount = 0;
+  let failedImageCount = 0;
+
+  if (!msg.item_list?.length) {
+    return { prompt: "", images, imageCount, failedImageCount };
+  }
+
   for (const item of msg.item_list) {
     if (item.type === MessageItemType.TEXT && item.text_item?.text) {
-      return item.text_item.text;
+      textParts.push(item.text_item.text);
+      continue;
+    }
+
+    if (item.type === MessageItemType.IMAGE) {
+      imageCount += 1;
+
+      if (!item.image_item) {
+        failedImageCount += 1;
+        continue;
+      }
+
+      logger.info(
+        `Inbound image metadata: media=${Boolean(item.image_item.media?.encrypt_query_param)} thumb_media=${Boolean(item.image_item.thumb_media?.encrypt_query_param)} url=${Boolean(item.image_item.url)} aeskey=${Boolean(item.image_item.aeskey)} mid_size=${item.image_item.mid_size ?? 0} thumb_size=${item.image_item.thumb_size ?? 0} hd_size=${item.image_item.hd_size ?? 0}`,
+      );
+
+      let data: Buffer | null;
+      try {
+        data = await downloadImage(item.image_item);
+      } catch (err) {
+        failedImageCount += 1;
+        logger.error(`Failed to download inbound WeChat image: ${String(err)}`);
+        continue;
+      }
+
+      if (!data) {
+        failedImageCount += 1;
+        continue;
+      }
+
+      const mimeType = detectImageMimeType(data);
+      if (!mimeType) {
+        failedImageCount += 1;
+        logger.warn("Inbound WeChat image has an unsupported MIME type");
+        continue;
+      }
+
+      images.push({ data, mimeType });
     }
   }
-  return "";
+
+  return {
+    prompt: textParts.join("\n"),
+    images,
+    imageCount,
+    failedImageCount,
+  };
 }

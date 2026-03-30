@@ -24,6 +24,10 @@ vi.mock("../util/logger.js", () => {
   };
 });
 
+vi.mock("../media/download.js", () => ({
+  downloadImage: vi.fn().mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+}));
+
 // ---- Helpers ----
 function makeTextMessage(
   userId: string,
@@ -41,9 +45,37 @@ function makeTextMessage(
   };
 }
 
+function makeImageMessage(
+  userId: string,
+  contextToken = "ctx-token-123",
+  text?: string,
+): WeixinMessage {
+  const item_list = [
+    ...(text ? [{ type: MessageItemType.TEXT, text_item: { text } }] : []),
+    {
+      type: MessageItemType.IMAGE,
+      image_item: {
+        media: {
+          encrypt_query_param: "enc",
+          aes_key: "aes",
+        },
+      },
+    },
+  ];
+
+  return {
+    message_type: MessageType.USER,
+    from_user_id: userId,
+    to_user_id: "bot",
+    context_token: contextToken,
+    item_list,
+  };
+}
+
 function createMockAgent(type: AgentType, response?: Partial<AgentResponse>): AgentBackend {
   return {
     type,
+    supportsImages: type === "claude",
     run: vi.fn<() => Promise<AgentResponse>>().mockResolvedValue({
       text: response?.text ?? `${type} response`,
       isError: response?.isError ?? false,
@@ -72,6 +104,7 @@ describe("dispatcher e2e", () => {
   let setContextToken: typeof import("../wechat/context-token.js").setContextToken;
   let initContextTokenStore: typeof import("../wechat/context-token.js").initContextTokenStore;
   let sendMessageMock: ReturnType<typeof vi.fn>;
+  let downloadImageMock: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     // Create temp directory for session storage
@@ -87,6 +120,7 @@ describe("dispatcher e2e", () => {
     const sessionsMod = await import("../storage/sessions.js");
     const contextTokenMod = await import("../wechat/context-token.js");
     const apiMod = await import("../wechat/api.js");
+    const mediaMod = await import("../media/download.js");
 
     createDispatcher = dispatcherMod.createDispatcher;
     registerAgent = registryMod.registerAgent;
@@ -98,7 +132,10 @@ describe("dispatcher e2e", () => {
     setContextToken = contextTokenMod.setContextToken;
     initContextTokenStore = contextTokenMod.initContextTokenStore;
     sendMessageMock = apiMod.sendMessage as ReturnType<typeof vi.fn>;
+    downloadImageMock = mediaMod.downloadImage as ReturnType<typeof vi.fn>;
     sendMessageMock.mockClear();
+    downloadImageMock.mockClear();
+    downloadImageMock.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
 
     // Setup
     initSessions(tmpDir);
@@ -161,6 +198,66 @@ describe("dispatcher e2e", () => {
     const texts = getSentTexts();
     expect(texts.length).toBeGreaterThanOrEqual(1);
     expect(texts[0]).toContain("Hello from Claude!");
+  });
+
+  it("routes an image-only message to claude with decoded image input", async () => {
+    const mockClaude = createMockAgent("claude", { text: "Image received" });
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    const msg = makeImageMessage(userId);
+    setContextToken(accountId, userId, "ctx-token-123");
+
+    await dispatch({ accountId, apiOpts, msg, typingTicket });
+
+    expect(downloadImageMock).toHaveBeenCalledTimes(1);
+    expect(mockClaude.run).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "",
+        images: [
+          expect.objectContaining({
+            mimeType: "image/png",
+            data: expect.any(Buffer),
+          }),
+        ],
+      }),
+    );
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Image received"))).toBe(true);
+  });
+
+  it("tells the user to switch to claude when the current agent does not support images", async () => {
+    const mockCodex = createMockAgent("codex");
+    registerAgent(mockCodex);
+
+    const dispatch = createDispatcher({ config: makeConfig({ defaultAgent: "codex" }) });
+    const msg = makeImageMessage(userId);
+    setContextToken(accountId, userId, "ctx-token-123");
+
+    await dispatch({ accountId, apiOpts, msg, typingTicket });
+
+    expect(mockCodex.run).not.toHaveBeenCalled();
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Switch to /claude"))).toBe(true);
+  });
+
+  it("replies with a download failure message when inbound image download throws", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+    downloadImageMock.mockRejectedValueOnce(new Error("CDN download failed: HTTP 500"));
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    const msg = makeImageMessage(userId);
+    setContextToken(accountId, userId, "ctx-token-123");
+
+    await dispatch({ accountId, apiOpts, msg, typingTicket });
+
+    expect(mockClaude.run).not.toHaveBeenCalled();
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("failed to download"))).toBe(true);
   });
 
   it("ignores non-USER messages", async () => {

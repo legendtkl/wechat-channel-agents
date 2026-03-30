@@ -1,9 +1,17 @@
-import { query, type Options, type SDKAssistantMessage, type SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
+import {
+  query,
+  type Options,
+  type SDKAssistantMessage,
+  type SDKResultMessage,
+  type SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { AgentBackend, AgentRequest, AgentResponse } from "../interface.js";
 import type { AppConfig } from "../../types.js";
 import { getSession, updateSession } from "../../storage/sessions.js";
 import { createHooks } from "./hooks.js";
 import { logger } from "../../util/logger.js";
+
+const DEFAULT_IMAGE_PROMPT = "Please analyze the attached image.";
 
 function extractText(msg: SDKAssistantMessage): string {
   const parts: string[] = [];
@@ -15,8 +23,40 @@ function extractText(msg: SDKAssistantMessage): string {
   return parts.join("");
 }
 
+function buildPrompt(req: AgentRequest): string | AsyncIterable<SDKUserMessage> {
+  if (!req.images?.length) {
+    return req.prompt;
+  }
+
+  const text = req.prompt.trim() || DEFAULT_IMAGE_PROMPT;
+  const content = [
+    { type: "text", text },
+    ...req.images.map((image) => ({
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: image.mimeType,
+        data: image.data.toString("base64"),
+      },
+    })),
+  ];
+
+  return (async function* multimodalPrompt(): AsyncIterable<SDKUserMessage> {
+    yield {
+      type: "user",
+      session_id: "",
+      parent_tool_use_id: null,
+      message: {
+        role: "user",
+        content,
+      } as SDKUserMessage["message"],
+    };
+  }());
+}
+
 export class ClaudeBackend implements AgentBackend {
   readonly type = "claude" as const;
+  readonly supportsImages = true;
 
   constructor(private config: AppConfig) {}
 
@@ -50,7 +90,7 @@ export class ClaudeBackend implements AgentBackend {
     }
 
     try {
-      const stream = query({ prompt: req.prompt, options });
+      const stream = query({ prompt: buildPrompt(req), options });
       const lastAssistantTexts: string[] = [];
 
       for await (const msg of stream) {
