@@ -4,6 +4,7 @@ export interface AgentRequest {
   userId: string;
   prompt: string;
   cwd: string;
+  onTextDelta?: (text: string) => Promise<void> | void;
 }
 
 export interface AgentResponse {

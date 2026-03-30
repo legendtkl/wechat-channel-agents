@@ -5,16 +5,22 @@ import type { WeixinApiOptions } from "../wechat/api.js";
 import { sendTextMessage, markdownToPlainText } from "../wechat/send.js";
 import { setContextToken, getContextToken } from "../wechat/context-token.js";
 import { getAgent, getRegisteredTypes } from "../agent/registry.js";
-import { getOrCreateSession, updateSession, resetAgentSession } from "../storage/sessions.js";
+import { getOrCreateSession, updateSession, resetAgentSession, listSessions, resumeAgentSession, resumeBySessionId } from "../storage/sessions.js";
+import type { AgentSessionListEntry } from "../storage/sessions.js";
+import { listClaudeCliSessions, listCodexCliSessions } from "../storage/external-sessions.js";
+import type { ExternalSession } from "../storage/external-sessions.js";
 import { hasAdminUsers, isUserAdmin, isUserAllowed } from "../auth/allowlist.js";
 import { resolveAvailableAgentType } from "./agent-resolution.js";
-import { formatResponse } from "./formatter.js";
+import { formatResponse, toolUseSummary } from "./formatter.js";
 import { chunkText } from "./chunker.js";
+import { createStreamingSender } from "./streaming-sender.js";
 import { logger } from "../util/logger.js";
 import { redactUserId } from "../util/redact.js";
 import { buildConversationKey, type AgentType, type AppConfig } from "../types.js";
 
 const TYPING_INTERVAL_MS = 10_000;
+const STREAM_FLUSH_INTERVAL_MS = 2_000;
+const STREAM_FLUSH_CHARS = 300;
 
 export interface DispatcherDeps {
   config: AppConfig;
@@ -78,6 +84,12 @@ export function createDispatcher(deps: DispatcherDeps) {
       case "/help":
         await handleHelp(accountId, apiOpts, userId);
         return;
+      case "/sessions":
+        await handleSessions(accountId, apiOpts, userId, conversationKey, trimmed.slice(9).trim());
+        return;
+      case "/resume":
+        await handleResume(accountId, apiOpts, userId, conversationKey, trimmed.slice(7).trim());
+        return;
       case "/cwd":
         await handleCwd(accountId, apiOpts, userId, conversationKey, trimmed.slice(4).trim());
         return;
@@ -92,6 +104,13 @@ export function createDispatcher(deps: DispatcherDeps) {
     // Route to agent
     const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
     const agentType = ensureSessionAgentAvailable(conversationKey, userId, session);
+    let streamedText = "";
+    const sender = createStreamingSender({
+      send: (text) => sendChunkSafely(accountId, apiOpts, userId, text),
+      flushIntervalMs: STREAM_FLUSH_INTERVAL_MS,
+      flushChars: STREAM_FLUSH_CHARS,
+      maxChunkLen: config.textChunkLimit,
+    });
 
     // Start typing indicator
     const typingController = new AbortController();
@@ -103,18 +122,35 @@ export function createDispatcher(deps: DispatcherDeps) {
         userId: conversationKey,
         prompt: trimmed,
         cwd: session.cwd,
+        onTextDelta: async (text) => {
+          if (!text) return;
+          streamedText += text;
+          await sender.push(text);
+        },
       });
 
       typingController.abort();
 
-      const response = formatResponse(result.text, result.toolsUsed, result.isError);
-      const plainText = markdownToPlainText(response);
-      const chunks = chunkText(plainText, config.textChunkLimit);
-
-      await sendChunks(accountId, apiOpts, userId, chunks);
+      if (streamedText) {
+        await sender.finish(buildStreamingFinalTail(
+          userId,
+          result.text,
+          streamedText,
+          result.toolsUsed,
+          result.isError,
+        ));
+      } else {
+        const response = formatResponse(result.text, result.toolsUsed, result.isError);
+        const plainText = markdownToPlainText(response);
+        const chunks = chunkText(plainText, config.textChunkLimit);
+        await sendChunks(accountId, apiOpts, userId, chunks);
+      }
     } catch (err) {
       typingController.abort();
       logger.error(`Agent error for user=${redactUserId(userId)}: ${String(err)}`);
+      if (streamedText) {
+        await sender.finish();
+      }
       await sendReply(accountId, apiOpts, userId, `Error: ${String(err)}`);
     }
   };
@@ -160,6 +196,141 @@ export function createDispatcher(deps: DispatcherDeps) {
     await sendReply(accountId, apiOpts, userId, `${agentType} session reset. Starting fresh.`);
   }
 
+  function toExternalEntries(externals: ExternalSession[]): AgentSessionListEntry[] {
+    return externals.map((ext) => ({
+      index: 0, // will be re-assigned by listSessions
+      sessionId: ext.id,
+      cwd: ext.cwd,
+      project: ext.project,
+      timestamp: ext.modifiedAt,
+      isActive: false,
+      source: "cli" as const,
+    }));
+  }
+
+  function formatSessionEntries(agentLabel: string, entries: AgentSessionListEntry[]): string[] {
+    const lines: string[] = [`[${agentLabel}]`];
+    for (const entry of entries) {
+      const idPart = entry.sessionId ? entry.sessionId.slice(0, 8) + "..." : "none";
+      const time = new Date(entry.timestamp).toLocaleString();
+      const proj = entry.project ? ` ${entry.project}` : "";
+      const tag = entry.source === "cli" ? " [cli]" : "";
+      if (entry.isActive) {
+        lines.push(`  * [active] (${idPart}) - ${entry.cwd} - ${time}`);
+      } else {
+        lines.push(`  ${entry.index}. (${idPart})${tag}${proj} - ${entry.cwd} - ${time}`);
+      }
+    }
+    return lines;
+  }
+
+  function parseAgentTypeArg(arg: string): AgentType | null {
+    const lower = arg.toLowerCase();
+    if (lower === "claude" || lower === "codex") return lower;
+    return null;
+  }
+
+  function buildSessionList(conversationKey: string, filter?: AgentType | null) {
+    const externalClaude = (!filter || filter === "claude") ? toExternalEntries(listClaudeCliSessions()) : [];
+    const externalCodex = (!filter || filter === "codex") ? toExternalEntries(listCodexCliSessions()) : [];
+    return listSessions(conversationKey, externalClaude, externalCodex);
+  }
+
+  async function handleSessions(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    arg: string,
+  ): Promise<void> {
+    getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+
+    const filter = arg ? parseAgentTypeArg(arg) : null;
+    if (arg && !filter) {
+      await sendReply(accountId, apiOpts, userId, "Usage: /sessions [claude|codex]");
+      return;
+    }
+
+    const result = buildSessionList(conversationKey, filter);
+
+    const lines: string[] = [];
+    if (!filter || filter === "claude") {
+      lines.push(...formatSessionEntries("Claude", result.claude));
+    }
+    if (!filter || filter === "codex") {
+      if (lines.length > 0) lines.push("");
+      lines.push(...formatSessionEntries("Codex", result.codex));
+    }
+
+    lines.push("");
+    lines.push("Use /resume <claude|codex> <n> to restore a session.");
+    await sendReply(accountId, apiOpts, userId, lines.join("\n"));
+  }
+
+  async function handleResume(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    conversationKey: string,
+    arg: string,
+  ): Promise<void> {
+    const parts = arg.split(/\s+/).filter(Boolean);
+
+    if (parts.length < 1) {
+      await sendReply(accountId, apiOpts, userId, "Usage: /resume <claude|codex> <n>\nUse /sessions to see available sessions.");
+      return;
+    }
+
+    let agentType: AgentType;
+    let indexStr: string;
+
+    if (parts.length === 1) {
+      const session = getOrCreateSession(conversationKey, config.defaultAgent, config.codex.workingDirectory);
+      agentType = session.agentType;
+      indexStr = parts[0];
+    } else {
+      const parsed = parseAgentTypeArg(parts[0]);
+      if (!parsed) {
+        await sendReply(accountId, apiOpts, userId, "Usage: /resume <claude|codex> <n>\nUse /sessions to see available sessions.");
+        return;
+      }
+      agentType = parsed;
+      indexStr = parts[1];
+    }
+
+    const index = parseInt(indexStr, 10);
+    if (isNaN(index) || index < 1) {
+      await sendReply(accountId, apiOpts, userId, "Usage: /resume <claude|codex> <n>\nUse /sessions to see available sessions.");
+      return;
+    }
+
+    // Build the same merged list to resolve index
+    const allSessions = buildSessionList(conversationKey, agentType);
+    const entries = agentType === "claude" ? allSessions.claude : allSessions.codex;
+    const target = entries.find((e) => e.index === index);
+
+    if (!target?.sessionId) {
+      await sendReply(accountId, apiOpts, userId, `${agentType} session #${index} not found. Use /sessions ${agentType} to see available sessions.`);
+      return;
+    }
+
+    // If it's from bot history, use the existing resume function
+    // If it's from CLI, use resumeBySessionId
+    if (target.source === "bot") {
+      const restored = resumeAgentSession(conversationKey, agentType, index - 1);
+      if (!restored) {
+        await sendReply(accountId, apiOpts, userId, `${agentType} session #${index} not found.`);
+        return;
+      }
+      const idPart = restored.sessionId.slice(0, 8) + "...";
+      await sendReply(accountId, apiOpts, userId, `Resumed ${restored.agentType} session (${idPart}), cwd: ${restored.cwd}`);
+    } else {
+      const restored = resumeBySessionId(conversationKey, agentType, target.sessionId, target.cwd, config.defaultAgent, config.codex.workingDirectory);
+      const idPart = restored.sessionId.slice(0, 8) + "...";
+      await sendReply(accountId, apiOpts, userId, `Resumed ${restored.agentType} CLI session (${idPart}), cwd: ${restored.cwd}`);
+    }
+  }
+
   async function handleStatus(
     accountId: string,
     apiOpts: WeixinApiOptions,
@@ -193,6 +364,8 @@ export function createDispatcher(deps: DispatcherDeps) {
       "Commands:",
       ...types.map((t) => `  /${t} - Switch to ${t}`),
       "  /reset - Reset current agent session",
+      "  /sessions [claude|codex] - List sessions per agent",
+      "  /resume <claude|codex> <n> - Resume a session",
       "  /status - Show current status",
       "  /help - Show this help",
       "  /cwd <path> - Change working directory",
@@ -309,17 +482,8 @@ export function createDispatcher(deps: DispatcherDeps) {
     userId: string,
     chunks: string[],
   ): Promise<void> {
-    const contextToken = getContextToken(accountId, userId);
     for (const chunk of chunks) {
-      try {
-        await sendTextMessage({
-          to: userId,
-          text: chunk,
-          opts: { ...apiOpts, contextToken },
-        });
-      } catch (err) {
-        logger.error(`Failed to send chunk accountId=${accountId} to=${redactUserId(userId)}: ${String(err)}`);
-      }
+      await sendChunkSafely(accountId, apiOpts, userId, chunk);
       if (chunks.length > 1) {
         await new Promise((r) => setTimeout(r, 200));
       }
@@ -360,6 +524,67 @@ export function createDispatcher(deps: DispatcherDeps) {
     }, TYPING_INTERVAL_MS);
 
     signal.addEventListener("abort", () => clearInterval(interval), { once: true });
+  }
+
+  async function sendChunk(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    const contextToken = getContextToken(accountId, userId);
+    await sendTextMessage({
+      to: userId,
+      text,
+      opts: { ...apiOpts, contextToken },
+    });
+  }
+
+  async function sendChunkSafely(
+    accountId: string,
+    apiOpts: WeixinApiOptions,
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    try {
+      await sendChunk(accountId, apiOpts, userId, text);
+    } catch (err) {
+      logger.error(`Failed to send chunk accountId=${accountId} to=${redactUserId(userId)}: ${String(err)}`);
+    }
+  }
+
+  function buildStreamingFinalTail(
+    userId: string,
+    finalText: string,
+    streamedText: string,
+    toolsUsed: string[],
+    isError: boolean,
+  ): string {
+    const parts: string[] = [];
+    if (finalText.startsWith(streamedText)) {
+      const remaining = finalText.slice(streamedText.length);
+      if (remaining) {
+        parts.push(remaining);
+      }
+    } else if (finalText !== streamedText) {
+      logger.warn(`Final streamed text mismatch for user=${redactUserId(userId)}; appending final body`);
+      parts.push(finalText);
+    }
+
+    const summary = toolUseSummary(toolsUsed);
+    if (summary) {
+      parts.push(summary);
+    }
+
+    if (isError) {
+      if (parts.length > 0) {
+        parts[0] = `[Error] ${parts[0]}`;
+      } else {
+        parts.push("[Error]");
+      }
+    }
+
+    return parts.join("\n\n");
   }
 
   function ensureSessionAgentAvailable(

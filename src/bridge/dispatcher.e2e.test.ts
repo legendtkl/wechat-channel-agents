@@ -44,11 +44,11 @@ function makeTextMessage(
 function createMockAgent(type: AgentType, response?: Partial<AgentResponse>): AgentBackend {
   return {
     type,
-    run: vi.fn<() => Promise<AgentResponse>>().mockResolvedValue({
+    run: vi.fn<(req: Parameters<AgentBackend["run"]>[0]) => Promise<AgentResponse>>().mockImplementation(async () => ({
       text: response?.text ?? `${type} response`,
       isError: response?.isError ?? false,
       toolsUsed: response?.toolsUsed ?? [],
-    }),
+    })),
     resetSession: vi.fn(),
     getStatus: vi.fn().mockReturnValue(`${type} is idle`),
   };
@@ -69,6 +69,8 @@ describe("dispatcher e2e", () => {
   let setAdminUsers: typeof import("../auth/allowlist.js").setAdminUsers;
   let initSessions: typeof import("../storage/sessions.js").initSessions;
   let getSession: typeof import("../storage/sessions.js").getSession;
+  let updateSession: typeof import("../storage/sessions.js").updateSession;
+  let listSessions: typeof import("../storage/sessions.js").listSessions;
   let setContextToken: typeof import("../wechat/context-token.js").setContextToken;
   let initContextTokenStore: typeof import("../wechat/context-token.js").initContextTokenStore;
   let sendMessageMock: ReturnType<typeof vi.fn>;
@@ -95,6 +97,8 @@ describe("dispatcher e2e", () => {
     setAdminUsers = allowlistMod.setAdminUsers;
     initSessions = sessionsMod.initSessions;
     getSession = sessionsMod.getSession;
+    updateSession = sessionsMod.updateSession;
+    listSessions = sessionsMod.listSessions;
     setContextToken = contextTokenMod.setContextToken;
     initContextTokenStore = contextTokenMod.initContextTokenStore;
     sendMessageMock = apiMod.sendMessage as ReturnType<typeof vi.fn>;
@@ -161,6 +165,56 @@ describe("dispatcher e2e", () => {
     const texts = getSentTexts();
     expect(texts.length).toBeGreaterThanOrEqual(1);
     expect(texts[0]).toContain("Hello from Claude!");
+  });
+
+  it("streams incremental agent output without re-sending the full body at the end", async () => {
+    const streamedBody = `${"a".repeat(300)}tail`;
+    const mockClaude: AgentBackend = {
+      type: "claude",
+      run: vi.fn(async (req) => {
+        await req.onTextDelta?.("a".repeat(300));
+        await req.onTextDelta?.("tail");
+        return {
+          text: streamedBody,
+          isError: false,
+          toolsUsed: [],
+        };
+      }),
+      resetSession: vi.fn(),
+      getStatus: vi.fn().mockReturnValue("claude is idle"),
+    };
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    const msg = makeTextMessage(userId, "stream this");
+    setContextToken(accountId, userId, "ctx-token-123");
+
+    await dispatch({ accountId, apiOpts, msg, typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts).toEqual(["a".repeat(300), "tail"]);
+  });
+
+  it("flushes streamed partial output before sending an error reply", async () => {
+    const mockClaude: AgentBackend = {
+      type: "claude",
+      run: vi.fn(async (req) => {
+        await req.onTextDelta?.("partial");
+        throw new Error("boom");
+      }),
+      resetSession: vi.fn(),
+      getStatus: vi.fn().mockReturnValue("claude is idle"),
+    };
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    const msg = makeTextMessage(userId, "stream then fail");
+    setContextToken(accountId, userId, "ctx-token-123");
+
+    await dispatch({ accountId, apiOpts, msg, typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts).toEqual(["partial", "Error: Error: boom"]);
   });
 
   it("ignores non-USER messages", async () => {
@@ -587,6 +641,181 @@ describe("dispatcher e2e", () => {
     await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "hello"), typingTicket });
 
     expect(mockClaude.run).toHaveBeenCalled();
+  });
+
+  it("/sessions shows both agents with active and archived sessions", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+    const conversationKey = `${accountId}:${userId}`;
+
+    // Create a session then give it a session ID
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "init"), typingTicket });
+    updateSession(conversationKey, { claudeSessionId: "sess-abc-123-456" });
+
+    // Reset to archive it
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/reset"), typingTicket });
+    sendMessageMock.mockClear();
+
+    // List all sessions
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/sessions"), typingTicket });
+
+    const texts = getSentTexts();
+    const full = texts.join("\n");
+    expect(full).toContain("[Claude]");
+    expect(full).toContain("[Codex]");
+    expect(full).toContain("[active]");
+    expect(full).toContain("sess-abc");
+    expect(full).toContain("/resume");
+  });
+
+  it("/sessions claude filters to only claude sessions", async () => {
+    const mockClaude = createMockAgent("claude");
+    const mockCodex = createMockAgent("codex");
+    registerAgent(mockClaude);
+    registerAgent(mockCodex);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+    const conversationKey = `${accountId}:${userId}`;
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "init"), typingTicket });
+    updateSession(conversationKey, { claudeSessionId: "claude-sess-111", codexThreadId: "codex-thread-222" });
+    sendMessageMock.mockClear();
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/sessions claude"), typingTicket });
+
+    const texts = getSentTexts();
+    const full = texts.join("\n");
+    expect(full).toContain("[Claude]");
+    expect(full).not.toContain("[Codex]");
+    expect(full).toContain("claude-s");
+  });
+
+  it("/sessions codex filters to only codex sessions", async () => {
+    const mockClaude = createMockAgent("claude");
+    const mockCodex = createMockAgent("codex");
+    registerAgent(mockClaude);
+    registerAgent(mockCodex);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+    const conversationKey = `${accountId}:${userId}`;
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "init"), typingTicket });
+    updateSession(conversationKey, { codexThreadId: "codex-thread-333" });
+    sendMessageMock.mockClear();
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/sessions codex"), typingTicket });
+
+    const texts = getSentTexts();
+    const full = texts.join("\n");
+    expect(full).toContain("[Codex]");
+    expect(full).not.toContain("[Claude]");
+    expect(full).toContain("codex-th");
+  });
+
+  it("/resume claude <n> restores a claude archived session", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+    const conversationKey = `${accountId}:${userId}`;
+
+    // Create session with a session ID
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "init"), typingTicket });
+    updateSession(conversationKey, { claudeSessionId: "sess-original-123" });
+
+    // Reset to archive it
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/reset"), typingTicket });
+
+    // Verify session was archived
+    const result = listSessions(conversationKey);
+    expect(result.claude.length).toBe(2); // active + 1 archived
+
+    sendMessageMock.mockClear();
+
+    // Resume the archived claude session
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/resume claude 1"), typingTicket });
+
+    const texts = getSentTexts();
+    const full = texts.join("\n");
+    expect(full).toContain("Resumed");
+    expect(full).toContain("claude");
+    expect(full).toContain("sess-ori");
+
+    // Verify the session was restored
+    const session = getSession(conversationKey);
+    expect(session?.claudeSessionId).toBe("sess-original-123");
+    expect(session?.agentType).toBe("claude");
+  });
+
+  it("/resume <n> uses current agent type", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+    const conversationKey = `${accountId}:${userId}`;
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "init"), typingTicket });
+    updateSession(conversationKey, { claudeSessionId: "sess-shorthand-789" });
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/reset"), typingTicket });
+    sendMessageMock.mockClear();
+
+    // Resume using shorthand (no agent name, uses current agent = claude)
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/resume 1"), typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Resumed"))).toBe(true);
+
+    const session = getSession(conversationKey);
+    expect(session?.claudeSessionId).toBe("sess-shorthand-789");
+  });
+
+  it("/resume with invalid index shows error", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/resume claude 99"), typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("not found"))).toBe(true);
+  });
+
+  it("/resume without args shows usage", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/resume"), typingTicket });
+
+    const texts = getSentTexts();
+    expect(texts.some((t) => t.includes("Usage:"))).toBe(true);
+  });
+
+  it("/help includes /sessions and /resume commands", async () => {
+    const mockClaude = createMockAgent("claude");
+    registerAgent(mockClaude);
+
+    const dispatch = createDispatcher({ config: makeConfig() });
+    setContextToken(accountId, userId, "ctx");
+
+    await dispatch({ accountId, apiOpts, msg: makeTextMessage(userId, "/help"), typingTicket });
+
+    const texts = getSentTexts();
+    const helpText = texts.join("\n");
+    expect(helpText).toContain("/sessions");
+    expect(helpText).toContain("/resume");
   });
 
   it("markdown in agent response is converted to plain text", async () => {

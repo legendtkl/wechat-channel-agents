@@ -82,31 +82,65 @@ export class CodexBackend implements AgentBackend {
   async run(req: AgentRequest): Promise<AgentResponse> {
     const entry = this.ensureThread(req.userId);
     const toolsUsed: string[] = [];
+    const streamedLengths = new Map<string, number>();
 
     try {
       const parts: string[] = [];
       const { events } = await entry.thread!.runStreamed(req.prompt);
 
       for await (const event of events) {
+        if (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") {
+          const item = event.item;
+          if (item.type === "agent_message") {
+            const emittedLength = streamedLengths.get(item.id) ?? 0;
+            const nextText = item.text ?? "";
+            if (nextText.length > emittedLength) {
+              const delta = nextText.slice(emittedLength);
+              streamedLengths.set(item.id, nextText.length);
+              await req.onTextDelta?.(delta);
+            }
+            if (event.type === "item.completed") {
+              parts.push(nextText);
+            }
+            continue;
+          }
+
+          if (event.type !== "item.completed") {
+            continue;
+          }
+
+          for (const mapped of this.mapItem(item)) {
+            switch (mapped.type) {
+              case "command":
+                toolsUsed.push("Bash");
+                parts.push(`> ${mapped.command}`);
+                if (mapped.output) {
+                  parts.push(mapped.output);
+                }
+                break;
+              case "file_change":
+                toolsUsed.push("Edit");
+                parts.push(`[file ${mapped.action}: ${mapped.path}]`);
+                break;
+              case "error":
+                parts.push(`Error: ${mapped.message}`);
+                break;
+              case "text":
+              case "turn_complete":
+                break;
+            }
+          }
+          continue;
+        }
+
         for (const mapped of this.mapEvent(event)) {
           switch (mapped.type) {
-            case "text":
-              parts.push(mapped.text);
-              break;
-            case "command":
-              toolsUsed.push("Bash");
-              parts.push(`> ${mapped.command}`);
-              if (mapped.output) {
-                parts.push(mapped.output);
-              }
-              break;
-            case "file_change":
-              toolsUsed.push("Edit");
-              parts.push(`[file ${mapped.action}: ${mapped.path}]`);
-              break;
             case "error":
               parts.push(`Error: ${mapped.message}`);
               break;
+            case "text":
+            case "command":
+            case "file_change":
             case "turn_complete":
               break;
           }
@@ -150,9 +184,6 @@ export class CodexBackend implements AgentBackend {
 
   private *mapEvent(event: ThreadEvent): Generator<CodexEvent> {
     switch (event.type) {
-      case "item.completed":
-        yield* this.mapItem(event.item);
-        break;
       case "turn.completed":
         yield { type: "turn_complete" };
         break;

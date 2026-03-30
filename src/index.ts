@@ -15,9 +15,13 @@ import { registerAgent } from "./agent/registry.js";
 import { ClaudeBackend } from "./agent/claude/backend.js";
 import { CodexBackend } from "./agent/codex/backend.js";
 import { createDispatcher } from "./bridge/dispatcher.js";
+import { installDnsBypass } from "./util/dns-bypass.js";
 import path from "node:path";
 
 async function main(): Promise<void> {
+  // 0. Bypass /etc/hosts (MOADeploy rewrites it)
+  installDnsBypass();
+
   // 1. Load config
   const config = loadConfig();
 
@@ -40,12 +44,8 @@ async function main(): Promise<void> {
   initContextTokenStore(config.stateDir);
 
   // 6. Register agent backends
-  if (config.anthropicBaseUrl && config.anthropicAuthToken) {
-    registerAgent(new ClaudeBackend(config));
-    logger.info("Registered Claude backend");
-  } else {
-    logger.warn("ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN not set, Claude backend disabled");
-  }
+  registerAgent(new ClaudeBackend(config));
+  logger.info("Registered Claude backend");
 
   registerAgent(new CodexBackend(config));
   logger.info("Registered Codex backend");
